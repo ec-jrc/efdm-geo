@@ -1,0 +1,1154 @@
+/###################################################################
+// EFDM-geo
+// July 1, 2016
+// Author: Maarten Hilferink, Object Vision
+//    
+//   
+//   Copyright 2016 European Union
+//   
+//   Licensed under the EUPL, Version 1.1 or - as soon they
+//   will be approved by the European Commission - subsequent
+//   versions of the EUPL (the "Licence");
+//   You may not use this work except in compliance with the
+//   Licence.
+//   You may obtain a copy of the Licence at:
+//   
+//  http://joinup.ec.europa.eu/software/page/eupl/licence-eupl   
+//   Unless required by applicable law or agreed to in
+//   writing, software distributed under the Licence is
+//   distributed on an "AS IS" basis,
+//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
+//   express or implied.
+//   See the Licence for the specific language governing
+//   permissions and limitations under the Licence.
+//   
+//###################################################################
+container EFDM
+{
+	container geometries
+	{
+		unit<dpoint> LambertEA: Descr = "ETRS_1989_LAEA_52N_10E" // "coords from SW to NE";
+			,	Format = "EPSG:3035" // EPSG code for Lambert EA
+		{
+			// extent: top 5,600,000; left 2,500,000; right 7,400,000; bottom 1,300,000
+			parameter<LambertEA> Origin := point(2500000.0, 1300000.0, LambertEA); // Left-Bottom coord
+			parameter<LambertEA> Extent := point(4900000.0, 4300000.0, LambertEA);
+	
+			parameter<LambertEA> LeftBottom := Origin;
+			parameter<LambertEA> LeftTop    := point(pointcol(Origin), pointrow(Origin)+pointrow(Extent), LambertEA);
+	
+			unit<wpoint> m100_base :=
+				range(
+					gridset(LambertEA
+					,	point(100.0, -100.0, LambertEA)
+					,	LeftTop
+					,	wpoint
+					)
+				,	Point(0w,0w)
+				,	WPoint(Extent  / point(100.0, 100.0, LambertEA))
+				);
+			unit<wpoint> m100 := TiledUnit(point(5120w, PointCol(BoundRange(m100_base)), m100_base));
+			
+			unit<wpoint> km1_base :=
+				range(
+					gridset(LambertEA
+					,	point(1000.0, -1000.0, LambertEA)
+					,	LeftTop
+					,	wpoint
+					)
+				,	Point(0w,0w)
+				,	WPoint(Extent  / point(1000.0, 1000.0, LambertEA))
+				);
+			unit<wpoint> km1 := TiledUnit(point(512w, PointCol(BoundRange(km1_base)), km1_base));
+		}
+		unit<wpoint> raster_domain := LambertEA/km1_base; // this parameterizes the domain of the raster mode
+		
+		unit<uint2> nuts_level { attribute<string> label := 'NUTS'+string(id(.)); }
+		container region_tables := for_each_ne(nuts_level/label, 'templates/nuts_data('+quote(nuts_level/label)+')');
+		
+		unit<uint32> run_country := subset(!IsDefined(strpos('.IS.LI.ME.MK.MT.TR.','.'+uppercase(region_tables/NUTS0/ReadData/NUTS_ID)+'.')))
+		{
+			attribute<string> label := region_tables/NUTS0/ReadData/NUTS_ID[nr_OrgEntity], DialogType = "LabelText";
+			
+			// run specific typology references
+			attribute<string> region_name       := '/geometries/run_region/regions/'+label;
+			container regions := for_each_nex(label, 'subset(substr(region_tables/NUTS1/ReadData/NUTS_ID,0,2)=='+quote(label)+')', uint32);
+		}
+		unit<uint32> run_region := subset(IsDefined(rlookup(substr(region_tables/NUTS1/ReadData/NUTS_ID,0,2),region_tables/NUTS0/ReadData/NUTS_ID)) && !IsDefined(strpos('.ES7.FR9.PT2.PT3.','.'+uppercase(region_tables/NUTS1/ReadData/NUTS_ID)+'.')))
+		{
+			attribute<string> label := region_tables/NUTS1/ReadData/NUTS_ID[nr_OrgEntity], DialogType = "LabelText";
+			attribute<string> run_country_name := substr(label, 0, 2);
+			attribute<run_country> run_country_rel := rlookup(run_country_name, run_country/label);
+			attribute<string> item_name := run_country_name+'/'+label; // create a per country container structure.
+			
+			// run specific typology references
+			attribute<string> species_name  := const('/classifications/species', .);
+			attribute<string> activity_name     := const('/classifications/activity', .);
+			attribute<string> commodity_name    := const('/classifications/commodity', .);
+		}
+	}
+	
+	container units
+	{
+		unit<float32> m  := BaseUnit('m', float32);
+		unit<uint16>  year := BaseUnit('yr', uint16);
+		
+		unit<float32> m2 := m * m;
+		unit<float32> m3 := m * m2;
+		unit<float32> ha := 10000 * m2;
+		unit<uint32>  ha_u32 := uint32(ha);
+		unit<float32> km := 1000 * m;
+		unit<float32> km2:= km * km;
+		unit<float32> m3_ha := m3 / ha;
+		unit<float32> m3_yr := m3 / year;
+		unit<float32> m3_km2 := m3 / km2;
+		unit<uint16>  m2_uint16 := uint16(m2);
+	}
+	container templates
+	{
+		template nuts_data
+		{
+			parameter<string> nuts_level_name;
+			unit<uint32> ReadData 
+			:	StorageName = "='%SourceDataDir%/EFDM/maps/NUTS_2010update/'+nuts_level_name+'_2010_m.shp'"
+			,	StorageType = "gdal.vect"
+			,	StorageReadOnly = "true"
+			{
+				attribute</geometries/LambertEA> Geometry(poly);
+				attribute<string> Label := NUTS_ID;
+			}
+			
+			attribute<ReadData> raster(/geometries/raster_domain) := poly2grid(ReadData/Geometry, /geometries/raster_domain, 1);
+		}
+		template sourcedata_maps
+		{
+			unit<wpoint> domain_1km; // parameter
+			unit<wpoint> domain_1ha; // parameter
+			container stockImpl {
+				attribute<units/m3_ha> broadleaf(domain_1km)
+					:	StorageName = "%sourcedatadir%/EFDM/maps/growingStockVolume/BLvol_FI_refined.tif"
+					,	StorageType = "gdal.grid"
+					,	StorageReadonly= "true"
+					,	DialogData = "geometries/LambertEA";
+					
+				attribute<units/m3_ha> conifer(domain_1km)
+					:	StorageName = "%sourcedatadir%/EFDM/maps/growingStockVolume/CFvol_FI_refined.tif"
+					,	StorageType = "gdal.grid"
+					,	StorageReadonly= "true"
+					,	DialogData = "geometries/LambertEA";
+			}
+			container stock {
+				attribute<units/m3_ha> broadleaf(domain_1km) := max_elem(stockImpl/broadleaf, 0[units/m3_ha]);
+				attribute<units/m3_ha> conifer(domain_1km) := max_elem(stockImpl/conifer, 0[units/m3_ha]);
+			}
+			container age
+			{
+				attribute<units/year> broadleaf(domain_1km)
+					:	StorageName = "%sourcedatadir%/EFDM/maps/age/BL_ageEstim_FIrefined16.tif"
+					,	StorageType = "gdal.grid"
+					,	StorageReadonly= "true"
+					,	DialogData = "geometries/LambertEA";
+					
+				attribute<units/year> conifer(domain_1km)
+					:	StorageName = "%sourcedatadir%/EFDM/maps/age/CF_ageEstim_FIrefined16.tif"
+					,	StorageType = "gdal.grid"
+					,	StorageReadonly= "true"
+					,	DialogData = "geometries/LambertEA";
+			}
+			
+			container distribution {
+				attribute<units/m2_uint16> broadleaf(domain_1ha)
+	//			:	StorageName = "%sourcedatadir%/EFDM/maps/speciesDistribution/BLfrac100mlzw.tif"
+				:	StorageName = "%sourcedatadir%/EFDM/maps/speciesDistribution/BL_fracCLCfill.tif"
+				,	StorageType = "gdal.grid"
+				,	StorageReadonly= "true"
+				,	DialogData = "geometries/LambertEA";
+				attribute<units/m2_uint16> conifer(domain_1ha)
+	//			:	StorageName = "%sourcedatadir%/EFDM/maps/speciesDistribution/CFfrac100mlzw.tif"
+				:	StorageName = "%sourcedatadir%/EFDM/maps/speciesDistribution/CF_fracCLCfill.tif"
+				,	StorageType = "gdal.grid"
+				,	StorageReadonly= "true"
+				,	DialogData = "geometries/LambertEA";
+			}
+			container factor_data
+			{
+				attribute<int32> suitabilityNoMgmt   (domain_1ha)
+				:	StorageName = "%sourcedatadir%/EFDM/maps/suitability/suitabilityNoMgmt.tif"
+				,	StorageType = "gdal.grid"
+				,	StorageReadonly= "true"
+				,	DialogData = "geometries/LambertEA";
+				attribute<int32> suitabilityThinning     (domain_1ha)
+				:	StorageName = "%sourcedatadir%/EFDM/maps/suitability/suitabilityThinning.tif"
+				,	StorageType = "gdal.grid"
+				,	StorageReadonly= "true"
+				,	DialogData = "geometries/LambertEA";
+				
+			}
+			container suitability  // map per activity, which could contain scenario specific factor combinations and/or weights.
+			{
+				attribute<int32> nomgmt   (domain_1ha) := factor_data/suitabilityNoMgmt;
+				attribute<int32> thin     (domain_1ha) := factor_data/suitabilityThinning;
+				attribute<int32> finalfell(domain_1ha) := factor_data/suitabilityThinning; // see http://www.mantis.objectvision.nl/view.php?id=724#c2754
+			}
+		}
+		template age_group_break
+		{
+			unit<uint32> classes_table;
+			parameter<string> region_name;
+			
+			unit<float32> values_unit := float32(units/year);
+			
+			parameter<classes_table> classes_table_rel := rlookup(region_name, classes_table/NUTS_ID);
+			
+			parameter<uint8>       num_classes := classes_table/num_classes      [classes_table_rel];
+			parameter<float32>     step_size   := float32(classes_table/step_size)[classes_table_rel];
+			unit<uint8> class := range(uint8, uint8(0), uint8(num_classes))
+			{
+				attribute<values_unit> break := float32(ID(.)) * float32(classes_table/step_size)[classes_table_rel];
+				attribute<values_unit> mean_value := 0.5f * (MakeDefined(break[ID(.)+1b], break*1.25f) + break);
+				attribute<values_unit> value_range:= 1.0f * (MakeDefined(break[ID(.)+1b], break*1.25f) - break);
+				attribute<string> label := string(break) + '..'+MakeDefined(string(break[id(.)+uint8(1)]), 'INF');
+			}
+		}
+		template volumne_class_break
+		{
+			unit<uint32> classes_table;
+			parameter<string> region_name;
+			
+			parameter<classes_table> classes_table_rel := rlookup(region_name, classes_table/NUTS_ID);
+
+			parameter<units/m3_ha> start_first_class := float32(classes_table/start_first_class[classes_table_rel]);
+			parameter<units/m3_ha> start_last_class  := float32(classes_table/start_last_class [classes_table_rel]);
+			parameter<uint8>       num_classes := classes_table/num_classes      [classes_table_rel];
+			
+			parameter<string> formula_key := classes_table/RANGE_M_3_HA__OR_ALGORITHM[classes_table_rel] + '[' + classes_table/COEFFICIENTS[classes_table_rel] + '; #k='+string(num_classes)+']';
+			
+			parameter<classifications/formulated_volumes> formulated_volume_rel := rlookup(formula_key, classifications/formulated_volumes/key);
+			
+			unit<uint8> even_class := range(uint8, uint8(0), uint8(num_classes))
+			{
+				attribute<units/m3_ha> break := start_first_class + (start_last_class - start_first_class) * float32(ID(.)) / float32(num_classes);
+			}
+			
+			unit<uint8> class := =IsDefined(formulated_volume_rel) ? 'classifications/formulated_volumes/VC_'+ string(formulated_volume_rel): 'even_class'
+			{
+				attribute<units/m3_ha> mean_value := 0.5f * (MakeDefined(break[ID(.)+1b], break*1.25f) + break);
+				attribute<units/m3_ha> value_range:= 1.0f * (MakeDefined(break[ID(.)+1b], break*1.25f) - break);
+				attribute<string> label := string(break) + '..'+MakeDefined(string(break[id(.)+uint8(1)]), 'INF');
+			}
+		}
+		template class_breaks
+		{
+			parameter<string> region_name;
+			parameter<string> species_name;
+			
+			container impl {
+				container age_group    := ='templates/age_group_break    (sourcedata/data/age/'  +species_name+', region_name)';
+				container volume_class := ='templates/volumne_class_break(sourcedata/data/stock/'+species_name+', region_name)';
+			}
+			unit<uint8> age_group    := impl/age_group/class;
+			unit<uint8> volume_class := impl/volume_class/class;
+		}
+		template activity
+		{
+			parameter<string> name;
+			
+// 			unit<uint32> readdata
+// 				:	StorageType = "gdal.vect"
+// 				,	StorageName = "='%SourceDataDir%/EFDM/data/activities/'+name+'actprobs.txt'"
+// 				,	StorageReadOnly = "True";
+//			the txts have spaces as value separator, which is not understood by gdal.vect so we need to do table-chopping
+			parameter<string> FileData
+ 				:	StorageType = "str"
+ 				,	StorageName = "='%SourceDataDir%/EFDM/data/activities/'+name+'actprobs.txt'"
+ 				,	StorageReadOnly = "True";
+ 			parameter<string> HeaderLine := readLines(FileData, void, 0);
+ 			parameter<string> FieldSeparator := ' ';
+ 			unit<UInt32> Domain := Range(UInt32, 0, strcount(FileData, '\n')-1)
+ 			{
+	 			attribute<string> Label := values/key;
+ 			}
+ 			unit<UInt32> Field := Range(UInt32, 0, strcount(HeaderLine, FieldSeparator)+1)
+			{
+				attribute<String> Name := ReadArray(HeaderLine, Field, String, 0);
+			}
+			
+			attribute<String> BodyLines(Domain) := readLines(FileData, Domain, HeaderLine/ReadPos);
+			
+			container Data := 
+				for_each_nedv(Field/Name, 
+					'ReadElems(BodyLines,string,'+MakeDefined( Field/Name[ID(Field)-1]+'/ReadPos','const(0,Domain)')+')'
+				,	Domain, string
+				);
+			container values :=
+				for_each_nedv(classifications/activity/name,
+					'float32(data/'+classifications/activity/name+')'
+				,	Domain, Float32
+				)
+			{
+ 				attribute<string> key(Domain) := Data/regions + '.' + Data/spcs + '.' + Data/vol + '.' + Data/age;
+ 				attribute<classifications/species> species_rel(Domain) := rlookup(Data/spcs, classifications/species/at_name);
+			}
+		}
+		template state_index
+		{
+			unit<uint8> age_group;
+			unit<uint8> volume_class;
+			unit<uint32> result := combine(age_group, volume_class), DialogType = "Map", DialogData = "gridset/base_grid"
+			{
+				attribute<age_group> age_group_rel := nr_1;
+				attribute<volume_class> volume_class_rel := nr_2;
+				attribute<string> name := 'a'+string(age_group_rel) + '_v' + string(volume_class_rel);
+				attribute<string> activity_table_key := string(volume_class_rel+1b)+'.'+string(age_group_rel+1b);
+				attribute<string> label := name + ': '+age_group/label[age_group_rel] + '[yr] ' + volume_class/label[volume_class_rel]+'[m3/ha]';
+				
+				// visualisation aid
+				unit<wpoint> gridset := range(wpoint, point(0w, 0w), point(uint16(#volume_class), uint16(#age_group)))
+				{
+					attribute<result> base_grid := union_data(., ID(result));
+				}
+			}
+		}
+		template run_region_data
+		{
+			parameter<string> name;
+			
+			parameter<geometries/run_region> run_region_rel := rlookup(name, geometries/run_region/label);
+			parameter<geometries/region_tables/NUTS1/ReadData> nuts1_rel := geometries/run_region/nr_OrgEntity[run_region_rel];
+
+			// run specific typologies
+			unit<uint8> species   := =/geometries/run_region/species_name  [run_region_rel];
+			unit<uint8> activity  := =/geometries/run_region/activity_name [run_region_rel];
+			unit<uint8> commodity := =/geometries/run_region/commodity_name[run_region_rel];
+		
+			container class_breaks := for_each_ne(species/name, 'templates/class_breaks(name, '+quote(species/name)+')');
+						
+			container state_indices := for_each_ne(species/name, 'templates/state_index(class_breaks/'+species/name+'/age_group, class_breaks/'+species/name+'/volume_class)');
+			
+			unit<uint32> region_sel  := subset(geometries/region_tables/NUTS1/raster == nuts1_rel), DialogType = "Map", Dialogdata = "base_grid"
+			{
+				attribute<domain_1km> domain_1km_rel := convert(nr_OrgEntity, domain_1km);
+				attribute<.> base_grid(domain_1km) := invert(domain_1km_rel);
+			}
+			unit<wpoint> domain_1km  := range(geometries/LambertEA/km1, min(region_sel/nr_OrgEntity), max(region_sel/nr_OrgEntity)+point(1w,1w));
+			unit<wpoint> domain_100m := gridset(domain_1km, point(0.1, 0.1), point(0.0, 0.0), wpoint);
+			
+			container sourcedata_maps := templates/sourcedata_maps(domain_1km, domain_100m);
+			
+			container raster_impl {
+				attribute<uint16> distribution_total(domain_100m) := ='add('+AsItemList('sourcedata_maps/distribution/'+species/name)+')';
+				unit<uint32> domain_100m_sel := subset(IsDefined(region_sel/base_grid[mapping(domain_100m, domain_1km)]) && distribution_total > 0w)
+					,	DialogTYpe = "Map", DialogData = "base_grid"
+				{
+					attribute<.> base_grid(domain_100m) := invert(nr_OrgEntity);
+					attribute<domain_1km> domain_1km_rel := nr_OrgEntity[domain_1km];
+					attribute<region_sel> region_sel_rel := region_sel/base_grid[domain_1km_rel];
+				}
+				container suitabilities := for_each_nedv(
+					species/name, 
+					'int32(sourcedata_maps/distribution/'+species/name+'[domain_100m_sel/nr_OrgEntity])',
+					domain_100m_sel, int32
+				)
+				{
+					attribute<int32> other(domain_100m_sel) := const(0i, domain_100m_sel);
+				}
+				unit<uint8> other_type := range(uint8, 0b, 1b);
+				unit<uint8> extended_species := range(uint8, 0b, uint8(#species + #other_type))
+				{
+					attribute<string> label := union_data(.,species/name, 'other');
+				}
+
+				container state_index_rel := for_each_nedvn(
+					species/name, 
+					replace('initial_state/state_index_rel/@FT@[domain_100m_sel/region_sel_rel]', '@FT@', species/name),
+					domain_100m_sel, state_indices, species/name+'/result'
+				);
+				parameter<units/ha> total_claim := = 'add('+AsItemList(replace('sum(initial_state/matrices/@FT@[units/ha])', '@FT@', species/name))+')';
+				
+				container min_claims := for_each_nednv(
+					species/name, 
+					replace('uint32(rounddown(initial_state/matrices/@FT@[units/ha]))', '@FT@', species/name),
+					state_indices, species/name+'/result', uint32
+				)
+				{
+					attribute<uint32> other(other_type) := const(0, other_type);
+				}
+				container max_claims  := for_each_nednv(
+					species/name, 
+					replace('uint32(roundup(initial_state/matrices/@FT@[units/ha]))', '@FT@', species/name),
+					state_indices, species/name+'/result', uint32
+				)
+				{
+					attribute<uint32> other(other_type) := const(#domain_100m_sel-uint32(rounddown(total_claim)), other_type);
+				}
+				
+				unit<uint16> atomic_regions := overlay(species/name, domain_100m_sel, state_index_rel)
+				{
+					attribute<other_type> other := const(0[other_type], .);
+				}
+				container balanced_alloc := discrete_alloc(extended_species/label, domain_100m_sel, suitabilities, 
+					ID(extended_species), extended_species/label, atomic_regions, atomic_regions/UnionData,
+					min_claims, max_claims, 0i, raster_impl);
+			}
+			template raster_set_templ {
+				parameter <species> species_rel;
+				
+				unit<uint32> result := subset(raster_impl/balanced_alloc/landuse[raster_impl/domain_100m_sel/base_grid] == species_rel)
+					,	DialogType = "Map", DialogData = "base_grid"
+				{
+					attribute<.> base_grid(domain_100m) := invert(nr_OrgEntity);
+				}
+			}
+			container raster_sets := for_each_ne(species/name, 'raster_set_templ('+string(ID(species))+'[species])');
+			
+			// X per region, species, volume_class, age_group
+			container initial_state {
+				container stock := for_each_nedv(species/name, 'sourcedata_maps/stock/'+species/name+'[region_sel/nr_OrgEntity[domain_1km]]', region_sel, units/m3_ha);
+				container age   := for_each_nedv(species/name, 'sourcedata_maps/age/'+species/name+'[region_sel/nr_OrgEntity[domain_1km]]', region_sel, units/year);
+				container volume_class:= for_each_nedvn(species/name, 'classify(stock/'+species/name+',class_breaks/'+species/name+'/volume_class/break)', region_sel, class_breaks, species/name+'/volume_class');
+				container age_group   := for_each_nedvn(species/name, 'classify(float32(age/'+species/name+'),class_breaks/'+species/name+'/age_group/break)', region_sel, class_breaks, species/name+'/age_group');
+				
+				container state_index_rel := for_each_nedvn(
+					species/name, 
+					replace('combine_data(state_indices/@FT@/result, age_group/@FT@, volume_class/@FT@)', '@FT@', species/name),
+					region_sel, state_indices, species/name+'/result'
+				);
+				container matrices := for_each_nednv(
+					species/name, 
+					replace('uint32(rounddown(sum(sourcedata_maps/distribution/@FT@[units/m2][units/ha], state_index_rel/@FT@[region_sel/base_grid][mapping(domain_100m, domain_1km)])))', '@FT@', species/name),
+					state_indices, species/name+'/result', units/ha_u32
+				),  KeepData = "True", FreeData = "False";
+				container rasters := for_each_nednvn(
+					species/name, 
+					replace('state_index_rel/@FT@[region_sel/base_grid[raster_sets/@FT@/result/nr_OrgEntity[domain_1km]]]', '@FT@', species/name),
+					raster_sets, species/name+'/result',
+					state_indices, species/name+'/result'
+				),  KeepData = "True", FreeData = "False";
+			}
+			
+			container transition_matrices
+			{
+				container nomgmt := 
+					for_each_ne(classifications/species/name, 
+						'templates/transition_matrix('
+							+quote('%SourceDataDir%/EFDM/data/activities/nomgmttransitionprobabilites/txt_format/'
+								+name+' '+species/tp_name+'_TransProbs.txt'
+							)
+							+',class_breaks/'+species/name+'/volume_class'
+							+',class_breaks/'+species/name+'/age_group'
+							+',state_indices/'+species/name+'/result'
+							+','+Quote(species/name)
+						+')'
+					);
+				container thin := 
+					for_each_ne(species/name, 
+						'templates/thinning_matrix(state_indices/'+classifications/species/name+'/result, '
+							'class_breaks/'+species/name+'/volume_class,'
+							'class_breaks/'+species/name+'/age_group,'
+							+Quote(species/name)+
+						')'
+					);
+				container finalfell :=
+					for_each_ne(species/name, 
+						'templates/final_felling_matrix(state_indices/'+classifications/species/name+'/result, '
+							'class_breaks/'+species/name+'/volume_class,'
+							+Quote(species/name)+
+						')'
+					);
+					
+				container combined :=
+					for_each_ne(species/name, 
+						'templates/combined_matrix(state_indices/'+classifications/species/name+'/result, activity, '+Quote(species/name)+')');
+			}
+		}
+		template transition_matrix 
+		{
+			parameter<string> file_name;
+			unit<uint8> volume_class;
+			unit<uint8> age_group;
+			unit<uint32> state_index;
+			parameter<string> species_name;
+			
+			parameter<string> file: StorageReadOnly = "True", StorageName = "=file_name", StorageType = "str";
+			unit<wpoint> trans_index:= range(wpoint, point(0w,0w), point(uint16(#state_index), uint16(#state_index)))
+			{
+ 				attribute<state_index> from := value(pointrow(ID(.)), state_index);
+ 				attribute<state_index> to   := value(pointcol(ID(.)), state_index);
+				attribute<string> Label :=  state_index/label[from] + ' -> ' + state_index/label[to];
+				attribute<Float32> Probability_Org := readArray(file, ., Float32, 0);
+				attribute<.> tr_rel := point(pointrow(ID(.))+0w, pointcol(ID(.)), .); // hack to avoid bug in 7.124: simplify after installation of 7.125. TODO: remove and check on GeoDmsVersion() >= 7.125
+				attribute<Float32> Probability_Tr := Probability_Org[tr_rel], // Transpose; for the derivation of cumulative pdf's, sparse must be lexicographically ordered on (from, to).
+					IntegrityCheck = "IsDefined(Probability_Org)"; // if this fails, number of AgeGRoups times number of Volume classes might nog match the definition for state_index., issue 732#2653.1
+			}
+			unit<uint32> sparse := subset(trans_index/Probability_Tr != 0f), KeepData = "True"
+			{
+				attribute<state_index> from := value(pointrow(nr_OrgEntity), state_index);
+				attribute<state_index> to   := value(pointcol(nr_OrgEntity), state_index);
+				attribute<string> Label :=  state_index/label[from] + ' -> ' + state_index/label[to];
+				attribute<Float32> Probability := trans_index/Probability_Tr[nr_OrgEntity];
+			}
+			attribute<Float32> totalProbabilyPerFrom(state_index) := sum(sparse/Probability, sparse/from);
+			attribute<Float32> totalProbabilyPerTo  (state_index) := sum(sparse/Probability, sparse/to  );
+		}
+		template thinning_matrix 
+		{
+			unit<uint32> state_index;
+			unit<uint8> volume_class;
+			unit<uint8> age_group;
+			parameter<string> species_name;
+			
+			unit<uint32> sparse := state_index
+			{
+				attribute<.> from (.) := ID(.);
+				attribute<uint8> prev_volume_class_rel := MakeDefined(volume_class_rel - 1b, 0b); // one drop of volume class, see e-mail dd 23-10-2015.
+				attribute<.> to   (.) := combine_data(., min_elem(age_group_rel+1b,uint8(#age_group-1)), prev_volume_class_rel);
+				attribute<Float32> Probability := const(1f, .);
+				
+				attribute<units/m3_ha> old_volume :=  volume_class/mean_value[volume_class_rel[from]];
+				attribute<units/m3_ha> new_volume :=  volume_class/mean_value[volume_class_rel[to  ]];
+				attribute<units/m3_ha> yield :=   old_volume - new_volume;
+			}
+		}
+		template final_felling_matrix 
+		{
+			unit<uint32> state_index;
+			unit<uint8> volume_class;
+			parameter<string> species_name;
+			
+			unit<uint32> sparse := state_index
+			{
+				attribute<.> from(.) := ID(.);
+				attribute<.> to  (.) := const(0[.],.); // ageclass 0, and volume class 0.
+				attribute<Float32> Probability := const(1f,.);
+				
+				attribute<units/m3_ha> yield :=  volume_class/mean_value[volume_class_rel[from]];
+			}
+		}
+		template combined_matrix 
+		{
+			unit<uint32> state_index;
+			unit<uint8> activity;
+			parameter<string> species_name;
+			
+			unit<wpoint> trans_index := ='nomgmt/'+species_name+'/trans_index';
+			unit<uint32> sparse := ='union_unit('+AsItemList(activity/name+'/'+species_name+'/sparse')+')',
+				DialogType = "Map", DialogData = "pair"
+			{
+				attribute<state_index> from := ='union_data(., '+AsItemList(activity/name+'/'+species_name+'/sparse/from')+')';
+				attribute<state_index> to   := ='union_data(., '+AsItemList(activity/name+'/'+species_name+'/sparse/to')+')';
+				attribute<activity> activity_rel := ='union_data(., '+AsItemList('const('+string(id(activity))+'[activity],'+activity/name+'/'+species_name+'/sparse)')+')';
+				attribute<float32> Probability := ='union_data(., '+AsItemList(activity/name+'/'+species_name+'/sparse/Probability')+')';
+				attribute<trans_index> pair := point(uint16(to), uint16(from), trans_index);
+				attribute<string> Label := activity/name[activity_rel] + ' - ' + trans_index/label[pair], DialogType = "LabelText";
+			}
+		}
+		template run {
+			parameter<string> run_country_code;
+			parameter<uint32> run_seed;
+			
+			parameter<geometries/run_country> run_country_rel := rlookup(run_country_code, geometries/run_country/label);
+			
+			container activity_table := templates/activity(run_country_code);
+			
+			unit<uint32> run_region := subset(geometries/run_region/run_country_rel == run_country_rel)
+			{
+				attribute<string> label     := geometries/run_region/label    [nr_OrgEntity];
+				attribute<string> item_name := geometries/run_region/item_name[nr_OrgEntity];
+			}
+			
+			container run_regions := for_each_ne(run_region/label, '/region_data/'+run_region/item_name);
+			unit<uint8> species := classifications/species;
+			unit<uint8> scale_factor_domain := species {
+				attribute<units/m3> Demand := ='union_data(., '+AsItemList('/Demand/aggr/'+name+'[run_country_rel]')+') * time_step_size';
+			}
+			unit<uint32> RRxFT := combine(run_region, species)
+			{
+				attribute<string> run_region_label := run_region/label[nr_1];
+				attribute<string> species_name := species/name [nr_2];
+				attribute<string> species_at_name := species/at_name [nr_2];
+				
+				attribute<string> item_name := run_region_label + '/' + species_name;
+				attribute<string> label := item_name, DialogType = "LabelText";
+				attribute<float32> time_step_size := ='union_data(., '+AsItemList('run_regions/'+run_region_label+'/CLASS_BREAKS/'+species_name+'/impl/age_group/step_size')+')';
+			}
+			unit<uint32> RRxFTxAT := combine(RRxFT, classifications/activity);
+			
+			parameter<float32> time_step_size := first(RRxFT/time_step_size), IntegrityCheck = "RRxFT/time_step_size == this";
+					
+			container activity_tables := for_each_nednv(
+				RRxFT/item_name[RRxFTxAT/nr_1]+'/'+classifications/activity/name[RRxFTxAT/nr_2],
+				replace(
+					'MakeDefined(rjoin('
+						'''@RR@.@FT2@.''+run_regions/@RR@/state_indices/@FT@/result/activity_table_key, '
+						'activity_table/values/key, '
+						'activity_table/values/@AT@)'
+					', 0f)'
+				,	'@RR@', RRxFT/run_region_label[RRxFTxAT/nr_1]
+				,	'@FT@', RRxFT/species_name    [RRxFTxAT/nr_1]
+				,	'@FT2@',RRxFT/species_at_name [RRxFTxAT/nr_1]
+				,	'@AT@', classifications/activity/name[RRxFTxAT/nr_2]
+				)
+			,	run_regions, RRxFT/run_region_label[RRxFTxAT/nr_1]+'/state_indices/'+RRxFT/species_name[RRxFTxAT/nr_1]+'/result', float32
+			);
+
+			container diagnostics {
+				
+				// the sum of each transprop with the same originating volume class and age group over all activities should be equal to the number of activities (3) for each run region and forest type
+				container transprob_test := for_each_nednv(
+					RRxFT/item_name,
+					replace(
+						'add('+AsItemList(replace(
+							'sum('
+								'run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/Probability'
+							', 	run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/from'
+							')'
+						,	'@AT@', classifications/activity/name))
+						+')'
+					,	'@RR@', RRxFT/run_region_label
+					,	'@FT@', RRxFT/species_name
+					)
+				,	run_regions, RRxFT/run_region_label+'/state_indices/'+RRxFT/species_name+'/result', float32
+				)
+				{
+					parameter<bool> IsOK := ='and('+AsItemList('all(abs('+RRxFT/item_name+'-3f) < 0.001f)')+')';
+				}
+					
+				// all activity_tables entries must relate to existing keys in activity_table
+				container activity_link_test := for_each_nednv(
+					RRxFT/item_name,
+					replace(
+							'IsDefined('+
+								'rlookup(''@RR@.@FT2@.''+run_regions/@RR@/state_indices/@FT@/result/activity_table_key, activity_table/values/key)'
+							+')'
+					,	'@RR@', RRxFT/run_region_label
+					,	'@FT@', RRxFT/species_name
+					,	'@FT2@',RRxFT/species_at_name
+					)
+				,	run_regions, RRxFT/run_region_label+'/state_indices/'+RRxFT/species_name+'/result', bool
+				)
+				{
+					parameter<bool> IsOK := ='and('+AsItemList('all('+RRxFT/item_name+')')+')';
+				}
+				// the sum of each rescaled activity probability should be equal to 1 for each run region, forest type, originating volume class and age group
+				container activity_totalProb_test := for_each_nednv(
+					RRxFT/item_name,
+					replace(
+							'add('+
+								AsItemList(replace(
+									'activity_tables/@RR@/@FT@/@AT@'
+								,	'@AT@', classifications/activity/name
+								))
+							+')'
+					,	'@RR@', RRxFT/run_region_label
+					,	'@FT@', RRxFT/species_name
+					)
+				,	run_regions, RRxFT/run_region_label+'/state_indices/'+RRxFT/species_name+'/result', float32
+				)
+				{
+					parameter<bool> IsOK := ='and('+AsItemList('all(abs('+RRxFT/item_name+'-1f) < 0.001f)')+')';
+				}
+				parameter<bool> IsOK := transprob_test/IsOK && activity_link_test/IsOK && activity_totalProb_test/IsOK;
+			}
+			
+			container yr2015: IntegrityCheck = "diagnostics/IsOK"
+			{
+				container state {
+					container scale_factors := for_each_nedv(scale_factor_domain/name, const('1f', scale_factor_domain), void, float32);
+					container matrices := for_each_ne(run_region/label, 'run_regions/'+run_region/label+'/initial_state/matrices'); 
+					container rasters  := for_each_ne(run_region/label, 'run_regions/'+run_region/label+'/initial_state/rasters'); 
+				}
+			}
+			unit<uint8> timestep := range(uint8, 0b, uint8(((2100f - 2015f)+(time_step_size-1f))/time_step_size))
+			{
+				attribute<uint16> endyear := uint16(2015f + float32(ID(.)+1b)*time_step_size); // last endyear is at least 2100 and the second last isnt.
+				attribute<string> curr_name := 'yr'+string(endyear);
+				attribute<string> prev_name := MakeDefined(curr_name[ID(.)-1b], 'yr2015');
+			}
+			container timesteps := for_each_ne(timestep/curr_name, 'run_timestep('+timestep/prev_name+'/state, '+String(run_seed * #timestep + UInt32(ID(timestep)))+')');
+		}
+		template run_timestep {
+			container prevstate;
+			parameter<uint32> timestep_seed;
+			
+			container regional_model
+			{
+				unit<uint32> iter := range(uint32,0, 2)
+				{
+					attribute<string> name := 'I'+string(id(.));
+					attribute<string> prev_state_name := MakeDefined(name[id(.)-1]+'/next_state', 'prevstate');
+				}
+				container iters := for_each_ne(iter/name, 'regional_model_iter(scale_factor_domain, '+iter/prev_state_name+')');
+				container last_iter := ='iters/'+last(iter/name);
+				
+				container apply_transitions := for_each_ne(run_region/label, 'regional_model_result('+quote(run_region/label)+')');
+			}
+			template raster_model_templ {
+				container run_region;
+				parameter<string> species_name;
+				unit<uint32> raster_set;
+				unit<uint32> state_index;
+				attribute<state_index> start(raster_set);
+				unit<uint32> combined_sparse_domain;
+				attribute<units/ha_u32> combined_sparse_trans_matrix_u32(combined_sparse_domain);
+				
+				container suitabilities := for_each_nedv(
+					classifications/activity/name, 
+					'int32(run_region/sourcedata_maps/suitability/'+classifications/activity/name+'[raster_set/nr_OrgEntity])',
+					raster_set, int32
+				);
+
+				container claims := for_each_nedv(
+					classifications/activity/name
+				,	'sum(combined_sparse_trans_matrix_u32'
+						'* uint32(combined_sparse_domain/activity_rel == '+string(id(classifications/activity))+'[classifications/activity])'
+					', combined_sparse_domain/from)'
+				,	state_index, uint32
+				);
+				
+				unit<uint8> Partition := range(uint8, 0b, 1b) { attribute<string> name : [ 'ID' ]; }
+				
+				unit<uint32> atomic_regions := state_index
+				{
+					attribute<.> UnionData(raster_set) := start;
+					attribute<.> ID := ID(state_index);
+				}
+				container balanced_alloc := discrete_alloc(classifications/activity/name, raster_set, suitabilities, 
+					const(0[Partition], classifications/activity), Partition/name, atomic_regions, atomic_regions/UnionData,
+					claims, claims, 0i, suitabilities);
+				
+				
+				unit<uint32> alloc_groups := combined_sparse_domain
+				{
+					attribute<state_index> destitation_rel := to;
+					attribute<string> label := ='union_data(.,'+
+						AsItemList(replace(
+							'''@AT@.''+run_region/transition_matrices/@AT@/@FT@/sparse/label'
+						,	'@FT@', species_name
+						,	'@AT@', classifications/activity/name
+						))
+					+')';
+					
+					attribute<uint32> cumul_breaks_end   := cumulate(combined_sparse_trans_matrix_u32);
+					attribute<uint32> cumul_breaks_start := MakeDefined(cumul_breaks_end[ID(.)-1],0);
+				}
+				
+				attribute<float32>      ordinal    (raster_set) := Float32(uint32(MakeDefined(balanced_alloc/landuse, 0b)) * #state_index + start) + rnd_uniform(0, raster_set, range(Float32, 0f, 1f)); // TODO: varying random seed.(based on year and RR)
+				attribute<raster_set>   permutation(raster_set) := index(ordinal);
+				attribute<alloc_groups> assignment (raster_set) := classify(invert(permutation), alloc_groups/cumul_breaks_start[uint32]);
+				attribute<state_index>  result     (raster_set) := alloc_groups/destitation_rel[assignment]
+				{
+					attribute<uint32> regional_aggr (state_index) := pcount(result);
+					attribute<units/ha> reg_model_res (state_index) := = 'state/matrices/'+run_region/name +'/'+ species_name+'[units/ha]';
+					attribute<units/ha> reg_model_diff(state_index) := regional_aggr[units/ha] - reg_model_res;
+					
+					attribute<classifications/activity> activity_rel(raster_set) := balanced_alloc/landuse;
+					unit<uint8> age_group := valuesUnit(state_index/age_group_rel);
+					attribute<age_group> age_group_rel(raster_set) := state_index/age_group_rel[result];
+					
+					unit<uint8> volume_class := valuesUnit(state_index/volume_class_rel);
+					attribute<volume_class> volume_class_rel(raster_set) := state_index/volume_class_rel[result];
+				}
+			}
+			
+			container raster_models := for_each_ne(RRxFT/item_name, 
+				'raster_model_templ('
+					'run_regions/'+RRxFT/run_region_label+','+
+					Quote(RRxFT/species_name)+','
+					'run_regions/'+RRxFT/run_region_label+'/raster_sets/'+RRxFT/species_name+'/result,'
+					'run_regions/'+RRxFT/run_region_label+'/state_indices/'+RRxFT/species_name+'/result,'
+					'prevstate/rasters/'+RRxFT/item_name+','
+					'run_regions/'+RRxFT/run_region_label+'/transition_matrices/combined/'+RRxFT/species_name+'/sparse,'
+					'regional_model/apply_transitions/'+RRxFT/run_region_label+'/impl/'+RRxFT/species_name+'/combined_u32'
+				')'
+			);
+				
+
+			container state {
+				container scale_factors := regional_model/last_iter/next_state/scale_factors;
+				container matrices := for_each_ne(run_region/label, 'regional_model/apply_transitions/'+run_region/label+'/matrices'); 
+				container rasters := for_each_nednvn(RRxFT/item_name, 'raster_models/'+RRxFT/item_name+'/result', 
+					raster_models, RRxFT/item_name+'/raster_set',
+					raster_models, RRxFT/item_name+'/state_index'
+				);
+			}
+		}
+		template regional_model_iter_component {
+			parameter<float32> scale_factor;
+			unit<uint32> state_index;
+			container activity_table;
+			
+			container scaled_production_activity := for_each_nedv(classifications/production_activity/name
+			,	replace('activity_table/@AT@ * scale_factor', '@AT@', classifications/production_activity/name)
+			,	state_index, float32
+			);
+			attribute<float32> total_production_activity(state_index) := ='add('+AsItemList('scaled_production_activity/'+classifications/production_activity/name)+')';
+			container results := for_each_nedv(classifications/production_activity/name
+			,	replace('scaled_production_activity/@AT@ / max_elem(total_production_activity, 1f)', '@AT@', classifications/production_activity/name)
+			,	state_index, float32
+			)
+			{
+				attribute<float32> nomgmt(state_index) := max_elem(1f - total_production_activity, 0f);
+			}
+		}
+		template regional_model_iter {
+			unit<uint8> scale_factor_domain;
+			container curr_state;
+			
+			container rescaled_activity := for_each_ne(RRxFT/item_name, 
+				replace(
+					'regional_model_iter_component(curr_state/scale_factors/@FT@, run_regions/@RR@/state_indices/@FT@/result, activity_tables/@IT@)'
+				,	'@RR@', RRxFT/run_region_label
+				,	'@FT@', RRxFT/species_name
+				,	'@IT@', RRxFT/item_name
+				)
+			);
+			
+			container diagnostics {
+				
+				// the sum of each rescaled activity probability should be equal to 1 for each run region, forest type, originating volume class and age group
+				container activity_totalProb_test := for_each_nednv(
+					RRxFT/item_name,
+					replace(
+							'add('+
+								AsItemList(replace(
+									'rescaled_activity/@RR@/@FT@/results/@AT@'
+								,	'@AT@', classifications/activity/name
+								))
+							+')'
+					,	'@RR@', RRxFT/run_region_label
+					,	'@FT@', RRxFT/species_name
+					)
+				,	run_regions, RRxFT/run_region_label+'/state_indices/'+RRxFT/species_name+'/result', float32
+				)
+				{
+					parameter<bool> IsOK := ='and('+AsItemList('all(abs('+RRxFT/item_name+'-1f) < 0.001f)')+')';
+				}
+				
+				// the sum of each transprob multiplied with each rescaled activity probability with the same originating volume class and age group should be equal to 1 for each run region and forest type
+				container joint_test := for_each_nednv(
+					RRxFT/item_name,
+					replace(
+						'add('+
+							AsItemList(replace(
+								'sum('
+									' run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/Probability'
+									'*rescaled_activity/@RR@/@FT@/results/@AT@[run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/from]'
+								', 	run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/from'
+								')'
+							,	'@AT@', classifications/activity/name
+							))
+						+')'
+					,	'@RR@', RRxFT/run_region_label
+					,	'@FT@', RRxFT/species_name
+					)
+				,	run_regions, RRxFT/run_region_label+'/state_indices/'+RRxFT/species_name+'/result', float32
+				)
+				{
+					parameter<bool> IsOK := ='and('+AsItemList('all(abs('+RRxFT/item_name+'-1f) < 0.001f)')+')';
+				}
+				parameter<bool> IsOK := activity_totalProb_test/IsOK && joint_test/IsOK;
+			}
+			
+			container production := for_each_nedv(scale_factor_domain/name
+			,	
+				'add('+
+					replace(
+						AsItemList(replace(
+						AsItemList(replace(
+							'sum('
+								'float32(prevstate/matrices/@RR@/@FT@[run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/from])'
+								'* run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/Probability'
+								'* rescaled_activity/@RR@/@FT@/results/@AT@[run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/from]'
+								'* run_regions/@RR@/transition_matrices/@AT@/@FT@/sparse/Yield'
+							')'
+						,	'@AT@', classifications/production_activity/name))
+						,	'@RR@', run_region/label))
+					,	'@FT@',  scale_factor_domain/name
+					,	'@FT2@', scale_factor_domain/at_name)
+				+')'
+			,	void, units/m3
+			)
+			,	IntegrityCheck = "diagnostics/IsOK";
+			container next_state {
+				container scale_factors := for_each_nedv(scale_factor_domain/name, 
+					replace('curr_state/scale_factors/@FT@ * scale_factor_domain/demand[@FTI@[scale_factor_domain]] / production/@FT@'
+					,	'@FT@', scale_factor_domain/name
+					,	'@FTI@', string(id(scale_factor_domain))
+					)
+				,	void, float32
+				);
+			}
+		}
+		template regional_model_result {
+			
+			parameter<string> run_region_label;
+
+			container run_region := = 'run_regions/'+run_region_label;
+			container state_indices := run_region/state_indices;
+			
+			container impl := for_each_ne(scale_factor_domain/name
+			,	replace(
+					'regional_model_species('
+						'''@FT@'','
+						'state_indices/@FT@/result,'
+						'run_region/transition_matrices/combined/@FT@/sparse,'
+						+String(timestep_seed * #scale_factor_domain + UInt32(ID(scale_factor_domain)))+
+					')'
+				,	'@RR@', run_region_label
+				,	'@FT@',  scale_factor_domain/name
+				)
+			);
+			container matrices := for_each_nednv(scale_factor_domain/name
+			,	
+				replace(
+					'impl/@FT@/result'
+				,	'@FT@',  scale_factor_domain/name
+				)
+			,	state_indices, scale_factor_domain/name+'/result', units/ha_u32
+			);
+			
+		}
+		
+		template regional_model_species {
+			
+			parameter<string> ft;
+			unit<uint32> state_matrix;
+			unit<uint32> combined;
+			parameter<uint32> ft_seed;
+	
+			
+			attribute<units/ha_u32> prev_state_matrix(state_matrix) := ='prevstate/matrices/'+run_region_label+'/'+ft;
+			
+			attribute<float32> combined_activity_probability(combined) := 
+			=	replace(
+					'union_data(combined,'
+						+ AsItemList(Replace(
+							'last_iter/rescaled_activity/@RR@/@FT@/results/@AT@[run_region/transition_matrices/@AT@/@FT@/sparse/from]'
+						,	'@AT@', classifications/activity/name
+						))
+					+')'
+				,	'@RR@', run_region_label
+				,	'@FT@', ft
+				)
+			,  KeepData = "True";
+			attribute<units/ha> combined_trans_matrix(combined) := 
+				float32(prev_state_matrix[combined/from]) * combined/Probability * combined_activity_probability
+			,  KeepData = "True";
+			
+			attribute<units/ha_u32> combined_trans_matrix_floor(combined) := uint32(rounddown(combined_trans_matrix));
+			
+			// suitability/probability of (from, to, act) for roundup
+			attribute<units/ha>  combined_diff(combined) := combined_trans_matrix - float32(combined_trans_matrix_floor);
+			
+			attribute<units/ha_u32> matrix_floor(state_matrix) := sum(combined_trans_matrix_floor, combined/from);
+			
+			// roundup claims per from
+			attribute<units/ha_u32> matrix_diff(state_matrix) := prev_state_matrix - matrix_floor,
+				IntegrityCheck = "prev_state_matrix >= matrix_floor"; // issue 732#2653.5
+			
+			// pertubated suitability
+			attribute<units/ha> combined_order(combined) := combined_diff + float32(ID(combined)) * 0.000001f;
+			
+			attribute<units/ha_u32> matrix_diff_cumul(state_matrix):= cumulate(matrix_diff);
+			
+			attribute<units/ha_u32>  matrix_diff_offset(state_matrix) := 
+				MakeDefined(matrix_diff_cumul[ID(state_matrix)-1], 0[units/ha_u32]);
+			
+			unit<uint32> counter := range(units/ha_u32, 0, sum(matrix_diff));
+			
+			// weight per combined
+			attribute<units/ha>  combined_weight       (combined) := max_elem(combined_diff, 0.0001[units/ha]);
+			attribute<units/ha>  combined_weight_cumul (combined) := cumulate(combined_weight);
+			attribute<units/ha>  combined_weight_breaks(combined) := makedefined(combined_weight_cumul[ID(combined)-1],0[units/ha]);
+			
+			attribute<units/ha>  weight_offset(state_matrix) := first(combined_weight_breaks, combined/from);
+			attribute<units/ha>  total_weight (state_matrix) := first(combined_weight_cumul , combined/from) - weight_offset;
+			attribute<state_matrix> claim_from_rel(counter) := classify(ID(counter),matrix_diff_offset);
+			attribute<units/ha>  claim_tickets(counter) := 
+					weight_offset[claim_from_rel]
+					+ rnd_uniform(ft_seed, counter, range(Float64,0.0f, 1.0f))
+					* total_weight[claim_from_rel];
+					
+			attribute<combined> claim_combined_rel(counter) := 
+					classify(claim_tickets, combined_weight_breaks);
+			
+			attribute<uint32> combined_frac(combined) := pcount(claim_combined_rel);
+			
+			// integer (from, to, act) transition matrices.
+			attribute<units/ha_u32> combined_u32(combined) := combined_trans_matrix_floor + combined_frac;
+			
+			// integer state matrices per to.
+			attribute<units/ha_u32> result (state_matrix) := sum(combined_u32,combined/To);
+		}
+	}
+	
+	container classifications
+	{
+		unit<uint8> species : nrofrows = 2
+		{
+			attribute<string> name : [ 'broadleaf', 'conifer' ];
+			attribute<string> label := name, DialogType = "LabelText";
+			attribute<string> at_name : [ 'broadleaves', 'conifers' ]; // used in columnn spcs in data\activities\XXactprops.txt
+			attribute<string> tp_name : [ 'BL', 'CF' ]; // used in filenames in data\activities\nomgmttransitopmnmprobabilities\txt_format
+		}
+		unit<uint8> volume_class : nrofrows = 11
+		{
+			attribute<string> name := 'vc'+string(id(.));
+			attribute<units/m3_ha> breaks
+			:	[0, 11, 34, 58, 83, 109, 137, 167, 202, 238, 276 ] // derived from JenksClassification on /sourcedata/stock/volume_density/ReadData
+//			,	DialogType = "CLASS_BREAKS"
+			;
+
+		}
+		unit<uint8> activity: nrofrows = 3
+		{
+			attribute<string> name : [ 'nomgmt', 'finalfell', 'thin' ];
+			attribute<string> label := name;
+			attribute<bool>   has_production : [ false, true, true ];
+			attribute<UInt32> BrushColor: [ rgb(128, 255, 128), rgb(255, 128, 128), rgb(255, 255, 128) ], DialogType = "BrushColor";
+		}
+		unit<uint8> production_activity := subset(activity/has_production)
+		{
+			attribute<string> name := activity/name[nr_OrgEntity];
+		}
+		unit<uint8> commodity: nrofrows = 4
+		{
+			attribute<string> name : [ 'SAWLOGS_C', 'SAWLOGS_NC', 'PULPWOOD_C','PULPWOOD_NC' ];
+			attribute<species> species_rel : [ 1, 0, 1, 0 ];
+		}
+		unit<uint32> formulated_volumes: nrofrows = 2
+		{
+			attribute<string> key : [
+				'a*(b^k-1)[a=15; b=1.16;k=class number; #k=11]' // used for conifer   in FI -> VC_0
+			,	'a*(b^k-1)[a=15; b=1.14;k=class number; #k=11]' // used for broadleaf in FI -> VC_1
+			];
+			unit<uint8> VC_0: nrofrows=11 {
+				attribute<units/m3_ha> range := 15.0[units/m3_ha] * 1.16f^float32(id(.));
+				attribute<units/m3_ha> break := MakeDefined(cumulate(range)[ID(.)-1b], 0[units/m3_ha]);
+			}
+			unit<uint8> VC_1: nrofrows=11 {
+				attribute<units/m3_ha> range := 15.0[units/m3_ha] * 1.14f^float32(id(.));
+				attribute<units/m3_ha> break := MakeDefined(cumulate(range)[ID(.)-1b], 0[units/m3_ha]);
+			}
+		}
+	}
+	
+	container sourcedata
+	{
+		container maps := templates/sourcedata_maps(geometries/LambertEA/km1, geometries/LambertEA/m100);
+		
+		container data
+		{
+			container stock {
+				unit<uint32> broadleaf
+					:	StorageName = "%sourcedatadir%/EFDM/data/growingStockVolume/BL/BLperHa_perNuts1.csv"
+					,	StorageType = "gdal.vect"
+					,	StorageReadonly= "true"
+					,	KeepData = "True"
+					,	DialogType = "Map", DialogData = "Polygon"
+				{
+					attribute<string> NUTS_ID; // read from .csv
+					
+					// derived attributes
+					attribute<units/m3_ha> start_first_class := value(MIN_M_3_HA_, units/m3_ha);
+					attribute<units/m3_ha> start_last_class  := value(MAX_M_3_HA_,  units/m3_ha);
+					attribute<units/m3_ha> step_size         := value(RANGE_M_3_HA__OR_ALGORITHM,  units/m3_ha);
+					attribute<uint8>       num_classes       := value(NUMCLASSES, uint8);
+					
+					attribute<geometries/region_tables/NUTS1/ReadData> nuts1_rel := rlookup(NUTS_ID, geometries/region_tables/NUTS1/ReadData/NUTS_ID);
+					attribute<geometries/LambertEA> Polygon(poly) := /geometries/region_tables/NUTS1/ReadData/Geometry[nuts1_rel];
+				}
+				unit<uint32> conifer
+					:	StorageName = "%sourcedatadir%/EFDM/data/growingStockVolume/CF/CFperHaperNuts1.csv"
+					,	StorageType = "gdal.vect"
+					,	StorageReadonly= "true"
+					,	KeepData = "True"
+					,	DialogType = "Map", DialogData = "Polygon"
+				{
+					attribute<string> NUTS_ID; // read from .csv
+					
+					// derived attributes
+					attribute<units/m3_ha> start_first_class := value(MIN_M_3_HA_, units/m3_ha);
+					attribute<units/m3_ha> start_last_class  := value(MAX_M_3_HA_,  units/m3_ha);
+					attribute<units/m3_ha> step_size         := value(RANGE_M_3_HA__OR_ALGORITHM,  units/m3_ha);
+					attribute<uint8>       num_classes       := value(NUMCLASSES, uint8);
+					
+					attribute<geometries/region_tables/NUTS1/ReadData> nuts1_rel := rlookup(NUTS_ID, geometries/region_tables/NUTS1/ReadData/NUTS_ID);
+					attribute<geometries/LambertEA> Polygon(poly) := /geometries/region_tables/NUTS1/ReadData/Geometry[nuts1_rel];
+				}
+			}
+			container age {
+				unit<uint32> broadleaf
+					:	StorageName = "%sourcedatadir%/EFDM/data/age/BL/BLageClassif_perNuts1.csv"
+					,	StorageType = "gdal.vect"
+					,	StorageReadonly= "true"
+					,	KeepData = "True"
+					,	DialogType = "Map", DialogData = "Polygon"
+				{
+					attribute<string> NUTS_ID; // read from .csv
+					
+					// derived attributes
+					attribute<units/year> median_age        := value(median, units/year);
+					attribute<units/year> start_first_class := value(STARTFIRSTCLASS, units/year);
+					attribute<units/year> start_last_class  := value(STARTLASTCLASS,  units/year);
+					attribute<units/year> step_size         := value(STEP,  units/year);
+					attribute<uint8>      num_classes       := value(NUMCLASSES, uint8);
+					
+					attribute<geometries/region_tables/NUTS1/ReadData> nuts1_rel := rlookup(NUTS_ID, geometries/region_tables/NUTS1/ReadData/NUTS_ID);
+					attribute<geometries/LambertEA> Polygon(poly) := /geometries/region_tables/NUTS1/ReadData/Geometry[nuts1_rel];
+				}
+				unit<uint32> conifer
+					:	StorageName = "%sourcedatadir%/EFDM/data/age/CF/CFageClassif_perNuts1.csv"
+					,	StorageType = "gdal.vect"
+					,	StorageReadonly= "true"
+					,	KeepData = "True"
+					,	DialogType = "Map", DialogData = "Polygon"
+				{
+					attribute<string> NUTS_ID; // read from .csv
+					
+					// derived attributes
+					attribute<units/year> median_age        := value(median, units/year);
+					attribute<units/year> start_first_class := value(STARTFIRSTCLASS, units/year);
+					attribute<units/year> start_last_class  := value(STARTLASTCLASS,  units/year);
+					attribute<units/year> step_size         := value(STEP,  units/year);
+					attribute<uint8>       num_classes      := value(NUMCLASSES, uint8);
+					
+					attribute<geometries/region_tables/NUTS1/ReadData> nuts1_rel := rlookup(NUTS_ID, geometries/region_tables/NUTS1/ReadData/NUTS_ID);
+					attribute<geometries/LambertEA> Polygon(poly) := /geometries/region_tables/NUTS1/ReadData/Geometry[nuts1_rel];
+				}
+			}
+		}
+	}
+	container region_data := for_each_ne(geometries/run_region/item_name, 'templates/run_region_data('+quote(geometries/run_region/label)+')');
+	container demand {
+		unit<uint32> impl : StorageName = "%SourceDataDir%/EFDM/data/demand/example_GFTMoutput.csv", StorageType = "gdal.vect", StorageReadOnly = "True";
+		container data := for_each_nedv(classifications/commodity/name, 
+			'value(rjoin(geometries/run_country/label, impl/nuts0, impl/'+classifications/commodity/name+'), units/m3_yr)', 
+			geometries/run_country, units/m3_yr
+		);
+		container aggr := for_each_nedv(classifications/species/name, 
+			'add('+AsItemList('data/'+classifications/commodity/name, classifications/commodity/species_rel)+')',
+			geometries/run_country, units/m3_yr
+		);
+	}
+	
+		container Demand_species {
+		unit<uint32> impl : StorageName = "%SourceDataDir%/EFDM/data/demandSpeciesDistribution/speciesDemand_.csv", StorageType = "gdal.vect", StorageReadOnly = "True";
+		container data := for_each_nedv(classifications/species/name, 
+			'value(rjoin(geometries/run_region/Label, impl/NUTS_ID, impl/'+classifications/species/name+'), units/ha)', 
+			geometries/run_region, units/ha
+		);
+
+	}
+	container runs := for_each_ne(geometries/run_country/label, 'templates/run('+quote(geometries/run_country/label)+', '+String(ID(geometries/run_country))+')');
+	
+	attribute<string> static_diagnostics(geometries/run_country) := 
+		= 'union_data(geometries/run_country, '
+			+AsItemList(
+				IsDefined(strpos('.CY.', '.'+geometries/run_country/label+'.'))  
+				?	Quote('Storage %SourceDataProjDir%/data/activities/nomgmttransitionprobabilites/txt_format/CY'+geometries/run_country/label+'0 BL_TransProbs.txt does not exist')
+				
+			:	'string(runs/'+geometries/run_country/label+'/diagnostics/IsOK)'
+			)
+		+')';
+}
